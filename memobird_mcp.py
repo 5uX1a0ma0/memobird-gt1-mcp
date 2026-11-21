@@ -5,9 +5,13 @@ Memobird GT1 MCP Server
 """
 
 import os
+import re
 import sys
 import urllib.request
+import threading
 from typing import Optional
+
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 # 引入同级驱动
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -16,65 +20,101 @@ from memobird_driver import MemobirdGT1
 try:
     from mcp.server.fastmcp import FastMCP
 except ImportError:
-    # 兼容备用方案：简易 JSON-RPC stdio
     FastMCP = None
 
 mcp = FastMCP("MemobirdGT1") if FastMCP else None
+_operation_lock = threading.Lock()
+
 
 def get_printer(mac: Optional[str] = None):
-    target_mac = mac or os.environ.get("MEMOBIRD_MAC", "00:15:83:41:F8:B2")
-    return MemobirdGT1(mac=target_mac)
+    target_mac = mac or os.environ.get("MEMOBIRD_MAC")
+    if not target_mac:
+        raise ValueError("provide mac or set MEMOBIRD_MAC")
+    if not re.fullmatch(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", target_mac):
+        raise ValueError("mac must use the colon-separated Bluetooth address format")
+    return MemobirdGT1(mac=target_mac.upper())
+
+
+def get_device_details(mac: Optional[str] = None) -> dict:
+    """读取设备结构化状态；未知字段为 null，原始 TLV 保留供诊断。"""
+    try:
+        with _operation_lock, get_printer(mac) as printer:
+            return {"ok": True, **printer.get_status()}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "connected": False}
+
+
+def get_device_status(mac: Optional[str] = None) -> str:
+    """获取咕咕机GT1连接状态、TLV序列号和自动关机分钟值。"""
+    try:
+        details = get_device_details(mac)
+        if not details["ok"]:
+            return f"获取设备状态失败: {details['error']}"
+        status = details
+        minutes = status.get("auto_shutdown_minutes")
+        shutdown = "未知" if minutes is None else ("永不关机" if minutes == 0 else f"{minutes} 分钟")
+        battery = status.get("battery_percent")
+        battery_text = "未知" if battery is None else f"{battery}%"
+        return (f"咕咕机 GT1 连接正常！序列号: {status.get('sn') or '未知'}, "
+                f"电量: {battery_text}, MAC: {status.get('mac')}, 自动关机: {shutdown}")
+    except Exception as e:
+        return f"获取设备状态失败: {str(e)}"
+
+
+def set_auto_shutdown(minutes: int, mac: Optional[str] = None) -> dict:
+    """Set the one-byte shutdown value and report the device readback."""
+    try:
+        with _operation_lock, get_printer(mac) as printer:
+            result = printer.set_auto_shutdown(minutes)
+        return {"ok": result["verified"], **result}
+    except Exception as exc:
+        return {"ok": False, "requested_minutes": minutes, "error": str(exc)}
+
+
+def print_text(content: str, bold: bool = False, underline: bool = False, mac: Optional[str] = None) -> str:
+    """发送文本打印任务；ACK 仅表示设备响应，不确认纸张已实际输出。"""
+    try:
+        with _operation_lock, get_printer(mac) as printer:
+            acknowledged = printer.print_text(content, bold=bold, underline=underline)
+        if acknowledged:
+            return "文本打印数据已发送，设备已响应 ACK；无法确认纸张已实际输出。"
+        return "文本打印数据已发送，但未收到设备 ACK；无法确认纸张已实际输出。"
+    except Exception as e:
+        return f"打印文本失败: {str(e)}"
+
+
+def print_image(image_path_or_url: str, dither: bool = True, mac: Optional[str] = None) -> str:
+    """发送图片打印任务；ACK 仅表示设备响应，不确认纸张已实际输出。"""
+    try:
+        if image_path_or_url.startswith("http://") or image_path_or_url.startswith("https://"):
+            req = urllib.request.Request(image_path_or_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                img_data = resp.read(MAX_IMAGE_BYTES + 1)
+        else:
+            with open(image_path_or_url, "rb") as f:
+                img_data = f.read(MAX_IMAGE_BYTES + 1)
+        if len(img_data) > MAX_IMAGE_BYTES:
+            raise ValueError("image exceeds 10 MiB input limit")
+
+        with _operation_lock, get_printer(mac) as printer:
+            acknowledged = printer.print_image(img_data, dither=dither)
+        if acknowledged:
+            return "图片打印数据已发送，设备已响应 ACK；无法确认纸张已实际输出。"
+        return "图片打印数据已发送，但未收到设备 ACK；无法确认纸张已实际输出。"
+    except Exception as e:
+        return f"打印图片失败: {str(e)}"
+
 
 if mcp:
-    @mcp.tool()
-    def get_device_status(mac: Optional[str] = None) -> str:
-        """获取咕咕机GT1的连接状态及设备序列号"""
-        try:
-            with get_printer(mac) as printer:
-                status = printer.get_status()
-                return f"咕咕机 GT1 连接正常！序列号: {status.get('sn', '未知')}, MAC: {status.get('mac')}"
-        except Exception as e:
-            return f"获取设备状态失败: {str(e)}"
-
-    @mcp.tool()
-    def print_text(content: str, bold: bool = False, underline: bool = False, mac: Optional[str] = None) -> str:
-        """
-        在咕咕机GT1上打印指定的纯文本小票/纸条。
-        :param content: 需要打印的文本内容
-        :param bold: 是否加粗
-        :param underline: 是否带下划线
-        """
-        try:
-            with get_printer(mac) as printer:
-                printer.print_text(content, bold=bold, underline=underline)
-                return "文本内容已成功发送并打印！"
-        except Exception as e:
-            return f"打印文本失败: {str(e)}"
-
-    @mcp.tool()
-    def print_image(image_path_or_url: str, dither: bool = True, mac: Optional[str] = None) -> str:
-        """
-        在咕咕机GT1上打印图片（支持本地文件路径或网络URL，自动处理灰度和Floyd-Steinberg抖动二值化）。
-        :param image_path_or_url: 图片本地路径或 HTTP/HTTPS 链接
-        :param dither: 是否开启误差扩散抖动算法以保留图像层次细节（默认 True）
-        """
-        try:
-            if image_path_or_url.startswith("http://") or image_path_or_url.startswith("https://"):
-                req = urllib.request.Request(image_path_or_url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    img_data = resp.read()
-            else:
-                with open(image_path_or_url, "rb") as f:
-                    img_data = f.read()
-
-            with get_printer(mac) as printer:
-                printer.print_image(img_data, dither=dither)
-                return "图片已成功转换点阵并打印完成！"
-        except Exception as e:
-            return f"打印图片失败: {str(e)}"
+    mcp.tool()(get_device_status)
+    mcp.tool()(get_device_details)
+    mcp.tool()(set_auto_shutdown)
+    mcp.tool()(print_text)
+    mcp.tool()(print_image)
 
 if __name__ == "__main__":
     if mcp:
         mcp.run()
     else:
-        print("FastMCP not installed in this environment. Run with python -m tools.memobird_gt1.memobird_mcp after installing mcp.")
+        print("FastMCP is unavailable. Install this project's requirements, then run memobird_mcp.py.", file=sys.stderr)
+        sys.exit(1)
