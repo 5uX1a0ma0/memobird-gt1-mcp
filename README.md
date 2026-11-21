@@ -11,10 +11,10 @@
 ## ✨ 特性
 
 - 🚫 **零官方服务依赖**：不装官方 App、不注册账号、不走云打印；打印机链路为本机蓝牙直连。图片 URL 会由 MCP 主机下载。
-- 🔌 **标准 MCP 工具**：`get_device_status` / `get_device_details` / `set_auto_shutdown` / `print_text` / `print_image`，任何 MCP 客户端可用。
+- 🔌 **标准 MCP 工具**：`list_system_serial_ports` / `get_device_status` / `get_device_details` / `set_auto_shutdown` / `print_text` / `print_image`，任何 MCP 客户端可用。
 - 🖼️ **任意图片打印**：本地文件或网络 URL 均可，自动等比缩放 + Floyd–Steinberg 误差扩散抖动，输出 384 点阵单色图。
 - 🧩 **独立可用**：不接 MCP 也能当作普通 Python 库直接调用。
-- 🔧 **单文件驱动**：`memobird_driver.py` 零第三方蓝牙依赖，仅需 Pillow。
+- 🔧 **协议与传输分离**：`memobird_driver.py` 负责 GT1 协议，`memobird_transport.py` 对接系统 RFCOMM / SPP 串口；原生 RFCOMM 无额外蓝牙库依赖，串口后端使用可选 pySerial。
 
 ## 🖥️ 系统要求
 
@@ -22,7 +22,7 @@
 |------|------|
 | 操作系统 | Windows、macOS、Linux；使用 RFCOMM 原生后端时为支持 AF_BLUETOOTH 的系统，其他平台使用系统 SPP 串口 |
 | 蓝牙 | 经典蓝牙 SPP 设备；先在系统蓝牙设置中配对，或配置已创建的 RFCOMM/虚拟串口端点 |
-| Python | 3.8+ |
+| Python | 3.10+（MCP SDK 2.x 要求） |
 | 硬件 | 咕咕机 GT1（其他 Memobird 型号未测试，协议可能兼容） |
 
 > 传输支持系统 RFCOMM socket 与操作系统已配对的 SPP 虚拟串口。系统负责配对和创建端口；本项目不扫描设备、不触发配对，也不支持 BLE GATT。Windows/macOS 的串口端点需按各自系统设置选择。
@@ -30,12 +30,16 @@
 ## 📦 安装
 
 ```bash
-git clone https://github.com/<your-account>/memobird-gt1-mcp.git
+git clone https://github.com/5uX1a0ma0/memobird-gt1-mcp.git
 cd memobird-gt1-mcp
 pip install -r requirements.txt
 # Optional system Bluetooth SPP serial-port backend (pySerial):
 pip install -r requirements-serial.txt
 ```
+
+MCP 服务基于官方 Python SDK `MCPServer` API（当前要求 `mcp>=2.3.0,<3`，Python 3.10+）。默认使用 stdio，供桌面客户端启动；也可显式启用 loopback Streamable HTTP。SDK 自动协商当前协议，并保留 legacy handshake 模式。工具同时提供可读文本、结构化结果和输出 schema；打印操作标注为有副作用。
+
+当前验证矩阵覆盖 SDK 2.3 的最新协议 `2026-07-28` 与 legacy `2025-11-25`，并已用 MCP SDK 1.30 客户端实测 stdio 互操作。新版客户端建议先用 SDK 默认的 auto 模式；只接受旧版 handshake 的客户端应使用其兼容模式。项目不提供已弃用的 HTTP+SSE 传输。
 
 ## 🚀 快速开始（独立使用）
 
@@ -94,6 +98,14 @@ Cursor 则写入项目根目录 `.cursor/mcp.json`：
   }
 }
 ```
+
+本地部署也可选择官方推荐的 Streamable HTTP（stdio 仍是默认传输）：
+
+```bash
+python memobird_mcp.py --transport streamable-http --host 127.0.0.1 --port 8000
+```
+
+MCP endpoint 为 `http://127.0.0.1:8000/mcp`。该命令只允许 loopback 地址，未配置 HTTP 身份验证，不要改成公网监听或通过未受保护的反向代理暴露打印机控制。
 
 配置后，即可让 AI 直接调用以下工具。MCP 工具也可通过每次调用的 `mac` 参数指定设备；未提供参数且未设置 `MEMOBIRD_MAC` 时会报错，不会回退到开发者设备地址。
 
@@ -169,7 +181,16 @@ bluetoothctl devices
 - 已实现 Linux RFCOMM socket 与通过 pySerial 使用系统 SPP 串口端点的传输路径。串口后端为可选依赖，需安装 `requirements-serial.txt`；Linux/Windows/macOS 实际可用端点由系统蓝牙栈、配对状态和设备 SPP 服务决定。当前开发机只验证了 Linux RFCOMM 实机；其他平台仍需各自实机验证。
 - 状态流解析器会重组分段/合并帧，校验长度和校验和，并跳过主动 `cmd 0x0a` 通知。已在 GT1 上读回序列号、自动关机值和电量原始码。官方 SDK 的 `HandTask.sendToMain` 将握手数组索引 3 作为电量，并对 GT1 使用普通设备表；状态 TLV 的 `Tag 4` 与这条字段顺序对应，`78` 映射为 `70%`。其他/未知电量码不猜测百分比，未知 TLV 在 `raw_fields` 保留十六进制。
 - 当前实机查询确认 `Tag 4=0x4e`、电量 `70%`。
-- 255 分钟写入后读回 `0xff`；0 分钟写入没有收到设置 ACK，读回仍是 `0xff`。未验证重启持久性、实际关机时间或纸张实际输出。
+- 255 分钟写入后读回 `0xff`；0 分钟写入没有收到设置 ACK，读回仍是 `0xff`。Linux RFCOMM 实机的文本与图片打印均已由用户确认正常出纸；自动关机设置的重启持久性和实际触发时间仍未验证。
+
+## 🧪 开发与测试
+
+```bash
+python -m pip install -r requirements.txt -r requirements-serial.txt pytest
+python -m pytest -q
+```
+
+测试包含协议帧/超时与传输 mock、stdio 和 loopback Streamable HTTP 集成；不会连接打印机或发送打印任务。CI 覆盖 Linux、macOS、Windows，以及 Python 3.10、3.13、3.14。
 
 ## 📄 License
 

@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""
-Memobird GT1 MCP Server
-为咕咕机 GT1 热敏打印机提供标准 MCP 协议工具支持。
-"""
+"""MCP server for GT1 status, battery, shutdown settings, and printing."""
 
 import os
 import sys
 import urllib.request
 import threading
-from typing import Optional
+from typing import Any, Optional
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
@@ -17,11 +14,23 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from memobird_driver import MemobirdGT1
 
 try:
-    from mcp.server.fastmcp import FastMCP
-except ImportError:
-    FastMCP = None
+    from mcp.server import MCPServer
+except ImportError as exc:
+    MCPServer = None
+    _SDK_IMPORT_ERROR = str(exc)
+else:
+    _SDK_IMPORT_ERROR = None
 
-mcp = FastMCP("MemobirdGT1") if FastMCP else None
+SERVER_VERSION = "0.3.0"
+mcp = MCPServer(
+    "MemobirdGT1",
+    version=SERVER_VERSION,
+    instructions=(
+        "Control a locally paired Memobird GT1 over Bluetooth SPP. "
+        "Read status before changing settings. Printing consumes paper; an ACK "
+        "does not prove physical output. Do not automatically retry print jobs."
+    ),
+) if MCPServer else None
 _operation_lock = threading.Lock()
 
 
@@ -46,7 +55,7 @@ def _configured_printer(mac, serial_port, transport):
     return get_printer(mac, serial_port=serial_port, transport=transport)
 
 
-def list_system_serial_ports() -> dict:
+def list_system_serial_ports() -> dict[str, Any]:
     """List OS serial endpoints without opening or probing any device."""
     from memobird_transport import list_serial_ports
     try:
@@ -55,7 +64,7 @@ def list_system_serial_ports() -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-def get_device_details(mac: Optional[str] = None, serial_port: Optional[str] = None, transport: Optional[str] = None) -> dict:
+def get_device_details(mac: Optional[str] = None, serial_port: Optional[str] = None, transport: Optional[str] = None) -> dict[str, Any]:
     """读取设备结构化状态；未知字段为 null，原始 TLV 保留供诊断。"""
     try:
         with _operation_lock, _configured_printer(mac, serial_port, transport) as printer:
@@ -81,7 +90,7 @@ def get_device_status(mac: Optional[str] = None, serial_port: Optional[str] = No
         return f"获取设备状态失败: {str(e)}"
 
 
-def set_auto_shutdown(minutes: int, mac: Optional[str] = None, serial_port: Optional[str] = None, transport: Optional[str] = None) -> dict:
+def set_auto_shutdown(minutes: int, mac: Optional[str] = None, serial_port: Optional[str] = None, transport: Optional[str] = None) -> dict[str, Any]:
     """Set the one-byte shutdown value and report the device readback."""
     try:
         with _operation_lock, _configured_printer(mac, serial_port, transport) as printer:
@@ -125,17 +134,63 @@ def print_image(image_path_or_url: str, dither: bool = True, mac: Optional[str] 
         return f"打印图片失败: {str(e)}"
 
 
-if mcp:
-    mcp.tool()(list_system_serial_ports)
-    mcp.tool()(get_device_status)
-    mcp.tool()(get_device_details)
-    mcp.tool()(set_auto_shutdown)
-    mcp.tool()(print_text)
-    mcp.tool()(print_image)
+MCP_TOOLS = (
+    list_system_serial_ports,
+    get_device_status,
+    get_device_details,
+    set_auto_shutdown,
+    print_text,
+    print_image,
+)
+PRINT_TOOLS = MCP_TOOLS
 
-if __name__ == "__main__":
-    if mcp:
+if mcp:
+    from mcp.types import ToolAnnotations
+
+    for tool in MCP_TOOLS:
+        read_only = tool in (list_system_serial_ports, get_device_status, get_device_details)
+        printing = tool in (print_text, print_image)
+        mcp.tool(annotations=ToolAnnotations(
+            read_only_hint=read_only,
+            destructive_hint=printing,
+            idempotent_hint=not printing,
+            open_world_hint=tool is not list_system_serial_ports,
+        ))(tool)
+
+
+def main(argv=None) -> int:
+    """Run a local stdio server or an explicitly selected loopback HTTP server."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--version", action="version", version=f"%(prog)s {SERVER_VERSION}")
+    parser.add_argument(
+        "--transport", choices=("stdio", "streamable-http"), default="stdio",
+        help="MCP transport (default: stdio; unrelated to Bluetooth transport)",
+    )
+    parser.add_argument(
+        "--host", choices=("127.0.0.1", "localhost", "::1"), default="127.0.0.1",
+        help="loopback HTTP bind address; unauthenticated public binding is not supported",
+    )
+    parser.add_argument("--port", type=int, default=8000, help="HTTP port (default: 8000)")
+    args = parser.parse_args(argv)
+    if not 1 <= args.port <= 65535:
+        parser.error("--port must be between 1 and 65535")
+    if mcp is None:
+        print(
+            "MCP SDK 2.3+ is unavailable. Install requirements.txt with Python 3.10+. "
+            f"Import error: {_SDK_IMPORT_ERROR}", file=sys.stderr,
+        )
+        return 1
+    if args.transport == "stdio":
         mcp.run()
     else:
-        print("FastMCP is unavailable. Install this project's requirements, then run memobird_mcp.py.", file=sys.stderr)
-        sys.exit(1)
+        mcp.run(
+            transport="streamable-http", host=args.host, port=args.port,
+            json_response=True, stateless_http=True,
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

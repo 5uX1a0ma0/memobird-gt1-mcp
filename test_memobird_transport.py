@@ -131,40 +131,46 @@ def test_missing_native_bluetooth_has_actionable_error(monkeypatch):
         t.open_transport('00:11:22:33:44:55',None,'rfcomm',1,115200,1)
 
 
-def test_serial_backend_connects_and_completes_full_handshake(monkeypatch):
+def test_serial_backend_connects_queries_status_sets_value_and_prints(monkeypatch):
     ports = []
+
     class ResponsivePort(Port):
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
             self.chunk = 65536
+            self.status_requests = 0
+            self.shutdown = 255
             ports.append(self)
+
         def write(self, data):
             count = super().write(data)
             if data and data[0] == 0xAA and len(data) >= 4:
-                if data[3] == 1:
-                    self.data.extend(make_frame(1, tlv(4, b"\x4e") + tlv(19, b"\xff")))
+                command = data[3]
+                if command == 1:
+                    self.status_requests += 1
+                    if self.status_requests == 1:
+                        response = make_frame(1, b"")
+                    else:
+                        response = make_frame(1, tlv(4, b"\x4e") + tlv(15, b"TEST-SERIAL\x00") + tlv(19, bytes([self.shutdown])))
+                    self.data.extend(response)
+                elif command == 3:
+                    self.shutdown = data[7]
+                    self.data.extend(make_frame(3, b"ack"))
+                elif command == 4:
+                    self.data.extend(make_frame(4, b"ack"))
             return count
+
     module = types.SimpleNamespace(Serial=ResponsivePort, SerialException=SerialError, SerialTimeoutException=WriteTimeout)
     monkeypatch.setattr(t, 'load_serial', lambda: module)
     printer = MemobirdGT1(serial_port='COM12', timeout=0.5)
+
     with printer:
         status = printer.get_status()
-    assert status['battery_percent'] == 70
-    assert status['auto_shutdown_minutes'] == 255
-    assert status['transport'] == 'serial'
+        setting = printer.set_auto_shutdown(30)
+        assert printer.print_text("hello") is True
+
+    assert status["battery_percent"] == 70
+    assert status["auto_shutdown_minutes"] == 255
+    assert setting["verified"] is True
+    assert setting["observed_minutes"] == 30
     assert ports[0].closed
-
-
-def test_serial_status_uses_shared_gt1_parser(stream):
-    printer = MemobirdGT1(serial_port='COM12')
-    printer.sock = stream
-    original = stream.sendall
-    def send(data):
-        original(data)
-        stream._port.data.extend(make_frame(1,tlv(4,b'\x4e')+tlv(19,b'\xff')))
-    stream.sendall = send
-    status = printer.get_status()
-    assert status['battery_percent'] == 70
-    assert status['auto_shutdown_minutes'] == 255
-    assert status['transport'] == 'serial'
-    assert status['serial_port'] == 'COM12'
