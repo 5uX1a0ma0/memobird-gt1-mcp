@@ -1,0 +1,2 @@
+# Optional backend for OS-provided Bluetooth SPP virtual serial ports.
+pyserial>=3.5

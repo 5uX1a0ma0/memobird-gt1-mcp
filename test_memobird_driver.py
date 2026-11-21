@@ -48,15 +48,15 @@ def test_unknown_electricity_code_stays_unknown():
     assert decode_electricity(82) is None
 
 
-def test_parse_status_tlvs_extracts_serial_from_real_device_capture():
-    response = bytes.fromhex(
-        "aa4f0001ff010001010100120201000d030100010401004f05010001060100001301000a14080000000000000000000f200036333634303439363337353030303030303000000000000000000000000000007c"
+def test_parse_status_tlvs_extracts_fields_from_valid_status_frame():
+    response = make_frame(
+        1, tlv(4, b"\x4f") + tlv(15, b"TEST-SERIAL\x00") + tlv(19, b"\x0a")
     )
 
     fields = parse_status_tlvs(response)
 
     assert fields[0x13] == b"\x0a"
-    assert fields[0x0F].split(b"\x00", 1)[0].decode("ascii") == "636404963750000000"
+    assert fields[0x0F].split(b"\x00", 1)[0].decode("ascii") == "TEST-SERIAL"
 
 
 def test_parse_status_tlvs_rejects_bad_checksum():
@@ -237,12 +237,12 @@ def test_invalid_print_parameters_fail_before_writes(monkeypatch):
 
 
 def test_status_decodes_serial_and_shutdown_from_tlv(monkeypatch):
-    response = make_frame(1, tlv(4, bytes([78])) + tlv(15, b"636404963750000000" + bytes([0]) * 14) + tlv(19, bytes([10])))
+    response = make_frame(1, tlv(4, bytes([78])) + tlv(15, b"TEST-SERIAL" + bytes([0]) * 21) + tlv(19, bytes([10])))
     printer = connected_printer(monkeypatch, responses_by_command={1: [response]})
 
     status = printer.get_status()
 
-    assert status["sn"] == "636404963750000000"
+    assert status["sn"] == "TEST-SERIAL"
     assert status["auto_shutdown_minutes"] == 10
     assert status["battery_raw"] == 78
     assert status["battery_percent"] == 70

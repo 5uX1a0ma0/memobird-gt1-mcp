@@ -3,6 +3,7 @@ import time
 import socket
 from typing import Optional, Dict, Any, List
 from PIL import Image
+from memobird_transport import open_transport, select_backend
 
 DEFAULT_PORT = 1
 DOT_WIDTH = 384  # GT1 打印头物理宽度：384 点阵
@@ -76,11 +77,15 @@ def split_gbk(text: str, max_bytes: int) -> List[bytes]:
     return chunks
 
 class MemobirdGT1:
-    def __init__(self, mac: str, port: int = DEFAULT_PORT, timeout: float = 10.0):
-        self.mac = mac
+    def __init__(self, mac: Optional[str] = None, port: int = DEFAULT_PORT, timeout: float = 10.0,
+                 serial_port: Optional[str] = None, transport: str = "auto", baudrate: int = 115200):
+        self.transport = select_backend(mac, serial_port, transport, port, baudrate, timeout)
+        self.serial_port = serial_port
+        self.baudrate = baudrate
+        self.mac = mac.upper() if mac and self.transport == "rfcomm" else None
         self.port = port
         self.timeout = timeout
-        self.sock: Optional[socket.socket] = None
+        self.sock: Optional[Any] = None
         self._rx_buffer = bytearray()
         self.notifications: List[bytes] = []
 
@@ -88,11 +93,10 @@ class MemobirdGT1:
         self.close()
         self._rx_buffer.clear()
         self.notifications.clear()
-        sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
-        sock.settimeout(self.timeout)
+        sock = open_transport(self.mac, self.serial_port, self.transport,
+                              self.port, self.baudrate, self.timeout)
         self.sock = sock
         try:
-            sock.connect((self.mac, self.port))
             sock.sendall(make_frame(cmd=1, payload=b""))
             try:
                 # Consume the handshake reply as a complete frame so it cannot
@@ -107,7 +111,7 @@ class MemobirdGT1:
             self.close()
             raise
 
-    def _socket(self) -> socket.socket:
+    def _socket(self) -> Any:
         if self.sock is None:
             raise RuntimeError("printer is not connected")
         return self.sock
@@ -146,7 +150,7 @@ class MemobirdGT1:
             sock.settimeout(remaining)
             try:
                 data = sock.recv(1024)
-            except socket.timeout:
+            except (socket.timeout, TimeoutError):
                 return None
             if not data:
                 self.close()
@@ -175,7 +179,7 @@ class MemobirdGT1:
             while drained < max_bytes:
                 try:
                     data = sock.recv(min(1024, max_bytes - drained))
-                except (socket.timeout, BlockingIOError):
+                except (socket.timeout, TimeoutError, BlockingIOError):
                     break
                 if not data:
                     self.close()
@@ -239,6 +243,8 @@ class MemobirdGT1:
         return {
             "connected": True,
             "mac": self.mac,
+            "transport": self.transport,
+            "serial_port": self.serial_port,
             "sn": sn,
             "battery_raw": battery_raw,
             "battery_percent": decode_electricity(battery_raw),
