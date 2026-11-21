@@ -2,7 +2,7 @@
 
 无需官方 App、无需云服务的**咕咕机 GT1 热敏打印机**开源驱动 + MCP Server。
 
-通过经典蓝牙 SPP 协议直连设备，让你的 Claude / Cursor / 任何 MCP 客户端直接指挥打印机输出小票、待办清单、表情包图片等。
+通过经典蓝牙 SPP 协议直连设备，可用支持新版 MCP 协议的客户端打印小票、待办清单和图片等。
 
 > 本项目完全基于对官方 Android SDK 的逆向分析，协议逆向细节见下文 [协议说明](#协议说明)。
 
@@ -11,7 +11,7 @@
 ## ✨ 特性
 
 - 🚫 **零官方服务依赖**：不装官方 App、不注册账号、不走云打印；打印机链路为本机蓝牙直连。图片 URL 会由 MCP 主机下载。
-- 🔌 **标准 MCP 工具**：`list_system_serial_ports` / `get_device_status` / `get_device_details` / `set_auto_shutdown` / `print_text` / `print_image`，任何 MCP 客户端可用。
+- 🔌 **标准 MCP 工具**：`list_system_serial_ports` / `get_device_status` / `get_device_details` / `set_auto_shutdown` / `print_text` / `print_image`，供支持当前 MCP 协议的客户端使用。
 - 🖼️ **任意图片打印**：本地文件或网络 URL 均可，自动等比缩放 + Floyd–Steinberg 误差扩散抖动，输出 384 点阵单色图。
 - 🧩 **独立可用**：不接 MCP 也能当作普通 Python 库直接调用。
 - 🔧 **协议与传输分离**：`memobird_driver.py` 负责 GT1 协议，`memobird_transport.py` 对接系统 RFCOMM / SPP 串口；原生 RFCOMM 无额外蓝牙库依赖，串口后端使用可选 pySerial。
@@ -37,9 +37,9 @@ pip install -r requirements.txt
 pip install -r requirements-serial.txt
 ```
 
-MCP 服务基于官方 Python SDK `MCPServer` API（当前要求 `mcp>=2.3.0,<3`，Python 3.10+）。默认使用 stdio，供桌面客户端启动；也可显式启用 loopback Streamable HTTP。SDK 自动协商当前协议，并保留 legacy handshake 模式。工具同时提供可读文本、结构化结果和输出 schema；打印操作标注为有副作用。
+MCP 服务基于官方 Python SDK `MCPServer` API（要求 `mcp>=2.3.0,<3`，Python 3.10+）。默认使用 stdio，也可显式启用本机 Streamable HTTP。工具同时提供可读文本、结构化结果和输出 schema；打印操作标注为有副作用。
 
-当前验证矩阵覆盖 SDK 2.3 的最新协议 `2026-07-28` 与 legacy `2025-11-25`，并已用 MCP SDK 1.30 客户端实测 stdio 互操作。新版客户端建议先用 SDK 默认的 auto 模式；只接受旧版 handshake 的客户端应使用其兼容模式。项目不提供已弃用的 HTTP+SSE 传输。
+服务仅接受当前 SDK 的最新 MCP 协议（SDK 2.3 对应 `2026-07-28`），不回退到旧的 `initialize` 握手，也不提供已弃用的 HTTP+SSE 传输。客户端需要支持新版协议；使用官方 Python SDK 时可选择默认的 `auto` 模式。
 
 ## 🚀 快速开始（独立使用）
 

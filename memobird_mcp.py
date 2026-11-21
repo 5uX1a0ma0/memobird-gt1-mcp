@@ -15,21 +15,44 @@ from memobird_driver import MemobirdGT1
 
 try:
     from mcp.server import MCPServer
+    from mcp.shared.exceptions import MCPError
+    from mcp.types import LATEST_PROTOCOL_VERSION, UNSUPPORTED_PROTOCOL_VERSION
 except ImportError as exc:
     MCPServer = None
+    MCPError = None
+    LATEST_PROTOCOL_VERSION = None
+    UNSUPPORTED_PROTOCOL_VERSION = None
     _SDK_IMPORT_ERROR = str(exc)
 else:
     _SDK_IMPORT_ERROR = None
+
+
+class _LatestProtocolOnly:
+    async def __call__(self, ctx, call_next):
+        if ctx.method != "initialize" and ctx.protocol_version == LATEST_PROTOCOL_VERSION:
+            return await call_next(ctx)
+
+        # Stateless HTTP can dispatch legacy requests without an initialize call.
+        if ctx.request_id is None:
+            return None
+        requested = (ctx.params or {}).get("protocolVersion") if ctx.method == "initialize" else ctx.protocol_version
+        raise MCPError(
+            code=UNSUPPORTED_PROTOCOL_VERSION,
+            message=f"This server requires MCP protocol {LATEST_PROTOCOL_VERSION}; legacy protocol modes are not supported.",
+            data={"supported": [LATEST_PROTOCOL_VERSION], "requested": requested},
+        )
+
 
 SERVER_VERSION = "0.3.0"
 mcp = MCPServer(
     "MemobirdGT1",
     version=SERVER_VERSION,
     instructions=(
-        "Control a locally paired Memobird GT1 over Bluetooth SPP. "
+        f"Control a locally paired Memobird GT1 over Bluetooth SPP using MCP {LATEST_PROTOCOL_VERSION}. "
         "Read status before changing settings. Printing consumes paper; an ACK "
         "does not prove physical output. Do not automatically retry print jobs."
     ),
+    middleware=[_LatestProtocolOnly()] if MCPServer else None,
 ) if MCPServer else None
 _operation_lock = threading.Lock()
 

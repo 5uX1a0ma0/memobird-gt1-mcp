@@ -14,14 +14,41 @@ def test_mcp_exposes_printing_status_and_settings_tools():
     ]
 
 
-@pytest.mark.parametrize("mode, expected_protocol", [("auto", "2026-07-28"), ("legacy", "2025-11-25")])
-def test_mcp_v2_stdio_client_lists_tools_and_calls_inventory(mode, expected_protocol):
+async def assert_legacy_handshake_rejected(endpoint):
+    from mcp import Client
+    from mcp.shared.exceptions import MCPError
+    from mcp.types import LATEST_PROTOCOL_VERSION, UNSUPPORTED_PROTOCOL_VERSION
+
+    try:
+        async with Client(endpoint, mode="legacy", read_timeout_seconds=10):
+            pytest.fail("Legacy handshake unexpectedly succeeded")
+    except BaseException as exc:
+        pending = [exc]
+        protocol_errors = []
+        while pending:
+            error = pending.pop()
+            if isinstance(error, MCPError):
+                protocol_errors.append(error)
+            else:
+                pending.extend(getattr(error, "exceptions", ()))
+        assert protocol_errors, repr(exc)
+        rejection = protocol_errors[0]
+    else:
+        pytest.fail("Legacy handshake unexpectedly succeeded")
+
+    assert rejection.code == UNSUPPORTED_PROTOCOL_VERSION
+    assert rejection.data["supported"] == [LATEST_PROTOCOL_VERSION]
+    assert rejection.data["requested"] == "2025-11-25"
+
+
+def test_mcp_v2_stdio_client_lists_tools_and_calls_inventory():
     import os
     import sys
     from pathlib import Path
 
     import anyio
     from mcp import Client, StdioServerParameters
+    from mcp.types import LATEST_PROTOCOL_VERSION
 
     async def exercise_server():
         root = Path(__file__).resolve().parent
@@ -36,8 +63,8 @@ def test_mcp_v2_stdio_client_lists_tools_and_calls_inventory(mode, expected_prot
             env=env,
             cwd=str(root),
         )
-        async with Client(server, mode=mode, read_timeout_seconds=10) as client:
-            assert client.protocol_version == expected_protocol
+        async with Client(server, mode="auto", read_timeout_seconds=10) as client:
+            assert client.protocol_version == LATEST_PROTOCOL_VERSION
             result = await client.list_tools()
             tools = {tool.name: tool for tool in result.tools}
             assert set(tools) == {
@@ -61,11 +88,12 @@ def test_mcp_v2_stdio_client_lists_tools_and_calls_inventory(mode, expected_prot
             assert setting.is_error is False
             assert setting.structured_content["ok"] is False
 
+        await assert_legacy_handshake_rejected(server)
+
     anyio.run(exercise_server)
 
 
-@pytest.mark.parametrize("mode, expected_protocol", [("auto", "2026-07-28"), ("legacy", "2025-11-25")])
-def test_mcp_v2_streamable_http_client_on_loopback(mode, expected_protocol):
+def test_mcp_v2_streamable_http_client_on_loopback():
     import os
     import socket
     import subprocess
@@ -74,7 +102,9 @@ def test_mcp_v2_streamable_http_client_on_loopback(mode, expected_protocol):
     from pathlib import Path
 
     import anyio
+    import httpx
     from mcp import Client
+    from mcp.types import LATEST_PROTOCOL_VERSION, UNSUPPORTED_PROTOCOL_VERSION
 
     root = Path(__file__).resolve().parent
     with socket.socket() as reservation:
@@ -105,8 +135,9 @@ def test_mcp_v2_streamable_http_client_on_loopback(mode, expected_protocol):
                 time.sleep(0.05)
 
         async def exercise_server():
-            async with Client(f"http://127.0.0.1:{port}/mcp", mode=mode, read_timeout_seconds=10) as client:
-                assert client.protocol_version == expected_protocol
+            endpoint = f"http://127.0.0.1:{port}/mcp"
+            async with Client(endpoint, mode="auto", read_timeout_seconds=10) as client:
+                assert client.protocol_version == LATEST_PROTOCOL_VERSION
                 tools = await client.list_tools()
                 assert len(tools.tools) == 6
                 ports = await client.call_tool("list_system_serial_ports", {})
@@ -115,6 +146,27 @@ def test_mcp_v2_streamable_http_client_on_loopback(mode, expected_protocol):
                 details = await client.call_tool("get_device_details", {})
                 assert details.is_error is False
                 assert details.structured_content["ok"] is False
+
+            await assert_legacy_handshake_rejected(endpoint)
+
+            # A stateless legacy client can try a tool call without handshaking.
+            async with httpx.AsyncClient(timeout=10) as http:
+                for version_headers in ({}, {"MCP-Protocol-Version": "2025-11-25"}):
+                    response = await http.post(
+                        endpoint,
+                        headers={"Accept": "application/json, text/event-stream", **version_headers},
+                        json={
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "method": "tools/call",
+                            "params": {"name": "list_system_serial_ports", "arguments": {}},
+                        },
+                    )
+                    response.raise_for_status()
+                    reply = response.json()
+                    assert "result" not in reply
+                    assert reply["error"]["code"] == UNSUPPORTED_PROTOCOL_VERSION
+                    assert reply["error"]["data"]["supported"] == [LATEST_PROTOCOL_VERSION]
 
         anyio.run(exercise_server)
     finally:
