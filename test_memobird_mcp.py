@@ -22,7 +22,7 @@ async def assert_legacy_handshake_rejected(endpoint):
     try:
         async with Client(endpoint, mode="legacy", read_timeout_seconds=10):
             pytest.fail("Legacy handshake unexpectedly succeeded")
-    except BaseException as exc:
+    except Exception as exc:
         pending = [exc]
         protocol_errors = []
         while pending:
@@ -102,7 +102,8 @@ def test_mcp_v2_streamable_http_client_on_loopback():
     from pathlib import Path
 
     import anyio
-    import httpx
+    import json
+    import urllib.request
     from mcp import Client
     from mcp.types import LATEST_PROTOCOL_VERSION, UNSUPPORTED_PROTOCOL_VERSION
 
@@ -150,23 +151,26 @@ def test_mcp_v2_streamable_http_client_on_loopback():
             await assert_legacy_handshake_rejected(endpoint)
 
             # A stateless legacy client can try a tool call without handshaking.
-            async with httpx.AsyncClient(timeout=10) as http:
-                for version_headers in ({}, {"MCP-Protocol-Version": "2025-11-25"}):
-                    response = await http.post(
-                        endpoint,
-                        headers={"Accept": "application/json, text/event-stream", **version_headers},
-                        json={
-                            "jsonrpc": "2.0",
-                            "id": 1,
-                            "method": "tools/call",
-                            "params": {"name": "list_system_serial_ports", "arguments": {}},
-                        },
-                    )
-                    response.raise_for_status()
-                    reply = response.json()
-                    assert "result" not in reply
-                    assert reply["error"]["code"] == UNSUPPORTED_PROTOCOL_VERSION
-                    assert reply["error"]["data"]["supported"] == [LATEST_PROTOCOL_VERSION]
+            def post_legacy_tool_call(version_headers):
+                request = urllib.request.Request(
+                    endpoint,
+                    data=json.dumps({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {"name": "list_system_serial_ports", "arguments": {}},
+                    }).encode(),
+                    headers={"Accept": "application/json, text/event-stream", "Content-Type": "application/json", **version_headers},
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    return json.loads(response.read())
+
+            for version_headers in ({}, {"MCP-Protocol-Version": "2025-11-25"}):
+                reply = await anyio.to_thread.run_sync(post_legacy_tool_call, version_headers)
+                assert "result" not in reply
+                assert reply["error"]["code"] == UNSUPPORTED_PROTOCOL_VERSION
+                assert reply["error"]["data"]["supported"] == [LATEST_PROTOCOL_VERSION]
 
         anyio.run(exercise_server)
     finally:
