@@ -104,7 +104,7 @@ def test_connect_consumes_handshake_before_print_ack(monkeypatch):
     handshake = make_frame(1, tlv(19, b"\x0a"))
     ack = make_frame(4, b"")
     fake = FakeSocket(responses_by_command={1: [handshake], 4: [ack]})
-    monkeypatch.setattr(memobird_driver.socket, "socket", lambda *args: fake)
+    monkeypatch.setattr(memobird_driver, "open_transport", lambda *args: fake)
     printer = MemobirdGT1(mac="00:11:22:33:44:55", timeout=0.1)
 
     printer.connect()
@@ -123,7 +123,7 @@ def test_connect_consumes_handshake_before_next_status(monkeypatch):
     handshake = make_frame(1, tlv(19, b"\x0a"))
     fresh_status = make_frame(1, tlv(19, b"\x1e"))
     fake = FakeSocket(responses_by_command={1: [handshake, fresh_status]})
-    monkeypatch.setattr(memobird_driver.socket, "socket", lambda *args: fake)
+    monkeypatch.setattr(memobird_driver, "open_transport", lambda *args: fake)
     printer = MemobirdGT1(mac="00:11:22:33:44:55", timeout=0.1)
 
     printer.connect()
